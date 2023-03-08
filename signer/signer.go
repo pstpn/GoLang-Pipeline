@@ -3,250 +3,179 @@ package main
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
-	"time"
 )
 
-// SingleHash - Функция получения значения хеша: crc32(data)+"~"+crc32(md5(data))
+// numberOfSteps - Number of steps
+const numberOfSteps = 6
+
+func InitStringChannels(channels []chan string, count, buf int) {
+
+	for i := 0; i < count; i++ {
+		channels[i] = make(chan string, buf)
+	}
+}
+
+// calculateSingleHash - Calculate hash value for current input data
+func calculateSingleHash(mu *sync.Mutex, inData, outData chan string) {
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+
+	inputData := <-inData
+
+	// Starting goroutine for calculating crc32(md5(data))
+	go func(tmpData string, outData chan string) {
+		defer wg.Done()
+		mu.Lock()
+		md5TempData := DataSignerMd5(tmpData)
+		mu.Unlock()
+		crc32Data := DataSignerCrc32(md5TempData)
+		outData <- crc32Data
+	}(inputData, outData)
+
+	// Calculate crc32(data)
+	tmpCrc32Data := DataSignerCrc32(inputData)
+	outData <- tmpCrc32Data
+
+	wg.Wait()
+}
+
+// SingleHash - Function for getting crc32(data)+"~"+crc32(md5(data))
 func SingleHash(in, out chan interface{}) {
 
-	// Создание waitgroup
+	i := 0
+
+	mu := sync.Mutex{}
 	wg := sync.WaitGroup{}
 
-	// Инициализация массива каналов для входных данных
 	inChannels := make([]chan string, MaxInputDataLen)
-
-	// Инициализация массива каналов для выходных данных
 	outChannels := make([]chan string, MaxInputDataLen)
+	InitStringChannels(inChannels, MaxInputDataLen, 1)
+	InitStringChannels(outChannels, MaxInputDataLen, 1)
 
-	// Инициализация каждого канала
-	for i := 0; i < MaxInputDataLen; i++ {
-		inChannels[i] = make(chan string, 1)
-		outChannels[i] = make(chan string, 1)
-	}
-
-	// Функция, реализующая отправку результата
-	// дальше по конвейеру по мере готовности
 	sendResult := func(i int) {
-
 		defer wg.Done()
-
-		// Сохранение полученных результатов и последующая отправка
 		tmpData := <-outChannels[i] + "~" + <-outChannels[i]
 		out <- tmpData
 	}
 
-	// Цикл по входным данным (пока канал открыт)
-	i := 0
-
 	for inData := range in {
 
-		// Добавление кол-ва горутин, которые необходимо будет подождать в конце
 		wg.Add(2)
-
-		// Получение данных
 		data := fmt.Sprintf("%d", inData.(int))
 
-		// Функция, реализующая вычисление хэша
-		go func(data, outData chan string) {
-
+		// Starting goroutine for calculating single hash value
+		go func(inData, outData chan string) {
 			defer wg.Done()
-
-			// Создание локальной waitgroup для ожидания внутренней горутины
-			wg1 := sync.WaitGroup{}
-			wg1.Add(1)
-
-			// Получения входных данных
-			inputData := <-data
-
-			// Запуск горутины для вычисления crc32(md5(data))
-			go func(tmpData string, outData chan string) {
-
-				defer wg1.Done()
-
-				// Вычисление md5(data)
-				md5TempData := DataSignerMd5(tmpData)
-				// Вычисление crc32(md5(data))
-				crc32Data := DataSignerCrc32(md5TempData)
-
-				// Передача данных дальше по конвейеру
-				outData <- crc32Data
-			}(inputData, outData)
-
-			// Вычисление crc32(data)
-			tmpCrc32Data := DataSignerCrc32(inputData)
-
-			// Передача данных дальше по конвейеру
-			outData <- tmpCrc32Data
-
-			// Ожидание завершения горутины
-			wg1.Wait()
+			calculateSingleHash(&mu, inData, outData)
 		}(inChannels[i], outChannels[i])
 
-		// Добавление данных во входной канал для хэша
 		inChannels[i] <- data
-
-		// Запуск функции отправки данных
 		go sendResult(i)
-
-		// Временный сон, чтобы избежать перегрева функции DataSignerMd5
-		time.Sleep(12 * time.Millisecond)
-
 		i++
 	}
 
-	// Ожидание завершения всех горутин
 	wg.Wait()
 }
 
-// MultiHash - Функция, реализующая вычисление значения хэша: crc32(th+data)), где th=0..5
-func MultiHash(in, out chan interface{}) {
+// calculateMultiHash - Calculate multi hash value for current input data
+func calculateMultiHash(inputData string, outChannel chan string) {
 
-	// Создание waitgroup
 	wg := sync.WaitGroup{}
 
-	// Создание массива th для вычисления хэша
-	strNums := [6]string{
-		"0",
-		"1",
-		"2",
-		"3",
-		"4",
-		"5",
+	outHash := make([]string, numberOfSteps)
+
+	for ind := 0; ind < numberOfSteps; ind++ {
+
+		curDigit := strconv.Itoa(ind)
+		wg.Add(1)
+
+		// Starting goroutine for calculating crc32(th+data))
+		go func(curDigit string, elem *string) {
+			defer wg.Done()
+			*elem = DataSignerCrc32(curDigit + inputData)
+		}(curDigit, &outHash[ind])
 	}
 
-	// Инициализация массива каналов для выходных данных
+	wg.Wait()
+	outChannel <- strings.Join(outHash, "")
+}
+
+// MultiHash - Function for getting crc32(th+data)), th=0..5
+func MultiHash(in, out chan interface{}) {
+
+	i := 0
+
+	wg := sync.WaitGroup{}
+
 	outChannels := make([]chan string, MaxInputDataLen)
+	InitStringChannels(outChannels, MaxInputDataLen, 0)
 
-	// Инициализация каждого канала выходных данных
-	for i := 0; i < MaxInputDataLen; i++ {
-		outChannels[i] = make(chan string)
-	}
-
-	// Функция, реализующая отправку результата
-	// дальше по конвейеру по мере готовности
 	sendResult := func(i int) {
-
 		defer wg.Done()
-
-		// Сохранение полученных результатов и последующая отправка
 		tmpData := <-outChannels[i]
 		out <- tmpData
 	}
 
-	// Цикл по входным данным (пока канал открыт)
-	i := 0
-
 	for inData := range in {
 
-		// Добавление кол-ва горутин, которые необходимо будет подождать в конце
 		wg.Add(2)
 
-		// Получение входных данных
-		data := inData.(string)
-
-		// Запуск горутины вычисления хэша
-		go func(outChannel chan string) {
-
+		// Starting goroutine for calculating multi hash value
+		go func(inputData string, outChannel chan string) {
 			defer wg.Done()
+			calculateMultiHash(inputData, outChannel)
+		}(inData.(string), outChannels[i])
 
-			// Создание локальной waitgroup
-			wg1 := sync.WaitGroup{}
-
-			// Создание массива выходного хэша
-			outHash := make([]string, 6)
-
-			// Цикл по массиву цифр th
-			for ind, curDigit := range strNums {
-
-				// Увеличение кол-ва ожидаемых горутин
-				wg1.Add(1)
-
-				// Запуск горутины для вычисления хэша crc32(th+data))
-				go func(curDigit string, elem *string) {
-
-					defer wg1.Done()
-
-					// Сон для перестраховки
-					time.Sleep(1 * time.Microsecond)
-
-					// Получение выходного хэша
-					*elem = DataSignerCrc32(curDigit + data)
-				}(curDigit, &outHash[ind])
-
-				// Сон для правильного порядка вычислений
-				time.Sleep(10 * time.Millisecond)
-			}
-
-			// Ожидание завершения всех горутин
-			wg1.Wait()
-
-			// Отправка полученных данных дальше
-			outChannel <- strings.Join(outHash, "")
-
-		}(outChannels[i])
-
-		// Запуск функции отправки данных
 		go sendResult(i)
-
 		i++
 	}
 
-	// Ожидание завершения всех горутин
 	wg.Wait()
 }
 
-// CombineResults - Функция, реализующая сортировку и конкатенацию всех полученных хэшей
+// CombineResults - Function that sorts and concatenates all received hashes
 func CombineResults(in, out chan interface{}) {
 
-	// Создание выходного массива
 	var result []string
 
-	// Накопление результатов
 	for inData := range in {
 		result = append(result, fmt.Sprint(inData))
 	}
 
-	// Сортировка результатов
 	sort.Strings(result)
-
-	// Отправка результатов дальше по конвейеру
 	out <- strings.Join(result, "_")
 }
 
-// ExecutePipeline - Функция, реализующая конвейерную обработку функций-воркеров, которые что-то делают
+// ExecutePipeline - Function that implements pipelining of worker functions that do something
 func ExecutePipeline(jobs ...job) {
 
-	// Создание waitgroup
 	wg := sync.WaitGroup{}
 
-	// Инициализация массива входных каналов
-	channels := make([]chan interface{}, len(jobs)+1)
+	var in chan interface{}
+	var out chan interface{}
 
-	// Инициализация каждого входного канала
-	for ind := 0; ind < len(jobs)+1; ind++ {
-		channels[ind] = make(chan interface{})
-	}
-
-	// Запуск всех джобов по порядку в горутинах
+	// Starting all jobs in goroutines
 	for i := 0; i < len(jobs); i++ {
-
-		// Увеличение кол-ва ожидаемых горутин
 		wg.Add(1)
+		out = make(chan interface{})
 
-		// Запуск конкретного джоба
-		go func(i int) {
+		// Starting current job
+		go runJob(&wg, jobs[i], in, out)
 
-			defer wg.Done()
-
-			jobs[i](channels[i], channels[i+1])
-
-			// Закрытие канала после завершения работы
-			close(channels[i+1])
-		}(i)
+		in = out
 	}
 
-	// Ожидание завершения всех горутин
 	wg.Wait()
+}
+
+// runJob - Run current job
+func runJob(wg *sync.WaitGroup, currentJob job, in, out chan interface{}) {
+
+	defer wg.Done()
+	currentJob(in, out)
+	defer close(out)
 }
