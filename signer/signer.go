@@ -8,39 +8,47 @@ import (
 	"sync"
 )
 
-// numberOfSteps - Number of steps
+// numberOfSteps - Number of steps to calculate MultiHash
 const numberOfSteps = 6
 
-func InitStringChannels(channels []chan string, count, buf int) {
+func initStringChannels(channels []chan string, count, buf int) {
 
 	for i := 0; i < count; i++ {
 		channels[i] = make(chan string, buf)
 	}
 }
 
+// wrapDataSignerMd5 - Calculate md5(data) hash value using sync.Mutex
+func wrapDataSignerMd5(mu *sync.Mutex, data string) string {
+
+	mu.Lock()
+	md5TempData := DataSignerMd5(data)
+	mu.Unlock()
+
+	return md5TempData
+}
+
 // calculateSingleHash - Calculate hash value for current input data
-func calculateSingleHash(mu *sync.Mutex, inData, outData chan string) {
+func calculateSingleHash(mu *sync.Mutex, inputData string) string {
+
+	var crc32Data, crc32md5Data string
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 
-	inputData := <-inData
-
 	// Starting goroutine for calculating crc32(md5(data))
-	go func(tmpData string, outData chan string) {
+	go func(tmpData string) {
 		defer wg.Done()
-		mu.Lock()
-		md5TempData := DataSignerMd5(tmpData)
-		mu.Unlock()
-		crc32Data := DataSignerCrc32(md5TempData)
-		outData <- crc32Data
-	}(inputData, outData)
+		md5TempData := wrapDataSignerMd5(mu, tmpData)
+		crc32md5Data = DataSignerCrc32(md5TempData)
+	}(inputData)
 
 	// Calculate crc32(data)
-	tmpCrc32Data := DataSignerCrc32(inputData)
-	outData <- tmpCrc32Data
+	crc32Data = DataSignerCrc32(inputData)
 
 	wg.Wait()
+
+	return crc32Data + "~" + crc32md5Data
 }
 
 // SingleHash - Function for getting crc32(data)+"~"+crc32(md5(data))
@@ -51,14 +59,12 @@ func SingleHash(in, out chan interface{}) {
 	mu := sync.Mutex{}
 	wg := sync.WaitGroup{}
 
-	inChannels := make([]chan string, MaxInputDataLen)
-	outChannels := make([]chan string, MaxInputDataLen)
-	InitStringChannels(inChannels, MaxInputDataLen, 1)
-	InitStringChannels(outChannels, MaxInputDataLen, 1)
+	inChannel := make(chan string)
+	outChannel := make(chan string)
 
-	sendResult := func(i int) {
+	sendResult := func(outChannel chan string) {
 		defer wg.Done()
-		tmpData := <-outChannels[i] + "~" + <-outChannels[i]
+		tmpData := <-outChannel
 		out <- tmpData
 	}
 
@@ -70,11 +76,12 @@ func SingleHash(in, out chan interface{}) {
 		// Starting goroutine for calculating single hash value
 		go func(inData, outData chan string) {
 			defer wg.Done()
-			calculateSingleHash(&mu, inData, outData)
-		}(inChannels[i], outChannels[i])
+			inputData := <-inData
+			outData <- calculateSingleHash(&mu, inputData)
+		}(inChannel, outChannel)
 
-		inChannels[i] <- data
-		go sendResult(i)
+		inChannel <- data
+		go sendResult(outChannel)
 		i++
 	}
 
@@ -82,7 +89,7 @@ func SingleHash(in, out chan interface{}) {
 }
 
 // calculateMultiHash - Calculate multi hash value for current input data
-func calculateMultiHash(inputData string, outChannel chan string) {
+func calculateMultiHash(inputData string) string {
 
 	wg := sync.WaitGroup{}
 
@@ -101,7 +108,8 @@ func calculateMultiHash(inputData string, outChannel chan string) {
 	}
 
 	wg.Wait()
-	outChannel <- strings.Join(outHash, "")
+
+	return strings.Join(outHash, "")
 }
 
 // MultiHash - Function for getting crc32(th+data)), th=0..5
@@ -111,12 +119,11 @@ func MultiHash(in, out chan interface{}) {
 
 	wg := sync.WaitGroup{}
 
-	outChannels := make([]chan string, MaxInputDataLen)
-	InitStringChannels(outChannels, MaxInputDataLen, 0)
+	outChannel := make(chan string)
 
-	sendResult := func(i int) {
+	sendResult := func(outChannel chan string) {
 		defer wg.Done()
-		tmpData := <-outChannels[i]
+		tmpData := <-outChannel
 		out <- tmpData
 	}
 
@@ -127,10 +134,10 @@ func MultiHash(in, out chan interface{}) {
 		// Starting goroutine for calculating multi hash value
 		go func(inputData string, outChannel chan string) {
 			defer wg.Done()
-			calculateMultiHash(inputData, outChannel)
-		}(inData.(string), outChannels[i])
+			outChannel <- calculateMultiHash(inputData)
+		}(inData.(string), outChannel)
 
-		go sendResult(i)
+		go sendResult(outChannel)
 		i++
 	}
 
@@ -155,8 +162,7 @@ func ExecutePipeline(jobs ...job) {
 
 	wg := sync.WaitGroup{}
 
-	var in chan interface{}
-	var out chan interface{}
+	var in, out chan interface{}
 
 	// Starting all jobs in goroutines
 	for i := 0; i < len(jobs); i++ {
@@ -172,7 +178,6 @@ func ExecutePipeline(jobs ...job) {
 	wg.Wait()
 }
 
-// runJob - Run current job
 func runJob(wg *sync.WaitGroup, currentJob job, in, out chan interface{}) {
 
 	defer wg.Done()
