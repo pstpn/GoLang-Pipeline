@@ -8,15 +8,7 @@ import (
 	"sync"
 )
 
-// numberOfSteps - Number of steps to calculate MultiHash
-const numberOfSteps = 6
-
-func initStringChannels(channels []chan string, count, buf int) {
-
-	for i := 0; i < count; i++ {
-		channels[i] = make(chan string, buf)
-	}
-}
+const NumberOfStepsToCalculateMultiHash = 6
 
 // wrapDataSignerMd5 - Calculate md5(data) hash value using sync.Mutex
 func wrapDataSignerMd5(mu *sync.Mutex, data string) string {
@@ -54,35 +46,19 @@ func calculateSingleHash(mu *sync.Mutex, inputData string) string {
 // SingleHash - Function for getting crc32(data)+"~"+crc32(md5(data))
 func SingleHash(in, out chan interface{}) {
 
-	i := 0
-
 	mu := sync.Mutex{}
 	wg := sync.WaitGroup{}
 
-	inChannel := make(chan string)
-	outChannel := make(chan string)
-
-	sendResult := func(outChannel chan string) {
-		defer wg.Done()
-		tmpData := <-outChannel
-		out <- tmpData
-	}
-
 	for inData := range in {
 
-		wg.Add(2)
+		wg.Add(1)
 		data := fmt.Sprintf("%d", inData.(int))
 
 		// Starting goroutine for calculating single hash value
-		go func(inData, outData chan string) {
+		go func() {
 			defer wg.Done()
-			inputData := <-inData
-			outData <- calculateSingleHash(&mu, inputData)
-		}(inChannel, outChannel)
-
-		inChannel <- data
-		go sendResult(outChannel)
-		i++
+			out <- calculateSingleHash(&mu, data)
+		}()
 	}
 
 	wg.Wait()
@@ -93,9 +69,9 @@ func calculateMultiHash(inputData string) string {
 
 	wg := sync.WaitGroup{}
 
-	outHash := make([]string, numberOfSteps)
+	outHash := make([]string, NumberOfStepsToCalculateMultiHash)
 
-	for ind := 0; ind < numberOfSteps; ind++ {
+	for ind := 0; ind < NumberOfStepsToCalculateMultiHash; ind++ {
 
 		curDigit := strconv.Itoa(ind)
 		wg.Add(1)
@@ -115,30 +91,18 @@ func calculateMultiHash(inputData string) string {
 // MultiHash - Function for getting crc32(th+data)), th=0..5
 func MultiHash(in, out chan interface{}) {
 
-	i := 0
-
 	wg := sync.WaitGroup{}
-
-	outChannel := make(chan string)
-
-	sendResult := func(outChannel chan string) {
-		defer wg.Done()
-		tmpData := <-outChannel
-		out <- tmpData
-	}
 
 	for inData := range in {
 
-		wg.Add(2)
+		wg.Add(1)
+		data := inData.(string)
 
 		// Starting goroutine for calculating multi hash value
-		go func(inputData string, outChannel chan string) {
+		go func() {
 			defer wg.Done()
-			outChannel <- calculateMultiHash(inputData)
-		}(inData.(string), outChannel)
-
-		go sendResult(outChannel)
-		i++
+			out <- calculateMultiHash(data)
+		}()
 	}
 
 	wg.Wait()
